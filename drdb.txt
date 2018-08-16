@@ -1,0 +1,412 @@
+CentOS 7下DRBD数据同步部署
+
+[日期：2017-12-08]	来源：Linux社区  作者：xiaozhagn	[字体：大 中 小]
+
+  
+
+ 
+DRBD数据同步
+
+DRBD安装：（HA高可用集群。在CentOS 7的版本下）
+
+环境：
+
+172.25.0.29  node1
+
+172.25.0.30  node2
+
+1.首先我们需要在node1和node2上添加一块硬盘，我这里就添加2G的硬盘来做演示：
+
+[root@node1 ~]# fdisk -l | grep /dev/sdb
+Disk /dev/sdb: 2147 MB, 2147483648 bytes, 4194304 sectors
+[root@node2 ~]# fdisk -l | grep /dev/sdb
+Disk /dev/sdb: 2147 MB, 2147483648 bytes, 4194304 sectors
+2、我们需要修改hosts文件保证hosts之间能够互相访问：
+
+node1上：
+
+[root@node1 ~]# cat /etc/hosts
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+172.25.0.29 node1
+172.25.0.30 node2
+node2上：
+
+[root@node2 ~]# cat /etc/hosts
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+172.25.0.29 node1 
+172.25.0.30 node2
+3、在node1修改ssh互信：
+
+[root@node1 ~]# ssh-keygen 
+[root@node1 ~]# ssh-copy-id node2
+The authenticity of host 'node2 (172.25.0.30)' can't be established.
+ECDSA key fingerprint is ae:88:02:59:f9:7f:e9:4f:48:8d:78:d2:6f:c7:7a:f1.
+Are you sure you want to continue connecting (yes/no)? yes
+/usr/bin/ssh-copy-id: INFO: attempting to log in with the new key(s), to filter out any that are already installed
+/usr/bin/ssh-copy-id: WARNING: All keys were skipped because they already exist on the remote system.
+4、在node1和node2上设置时钟同步：
+
+node1：
+
+[root@node1 ~]# crontab -e
+*/5 * * * * ntpdate cn.pool.ntp.org   ###添加任务 
+node2：
+
+[root@node1 ~]# crontab -e
+*/5 * * * * ntpdate cn.pool.ntp.org   ###添加任务 
+在node1和node2上可以看到已经添加时间任务：
+
+[root@node1 ~]# crontab -l
+*/5 * * * * ntpdate cn.pool.ntp.org
+[root@node2 ~]# crontab -l
+*/5 * * * * ntpdate cn.pool.ntp.org 
+5、现在我们就要开始安装drbd包在node1和node2操作：
+
+node1上：
+
+[root@node1 ~]# rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+[root@node1 ~]# rpm -Uvh http://www.elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm
+Retrieving http://www.elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm
+Retrieving http://elrepo.org/elrepo-release-7.0-3.el7.elrepo.noarch.rpm
+Preparing...                          ################################# [100%]
+Updating / installing...
+   1:elrepo-release-7.0-3.el7.elrepo  ################################# [100%]
+[root@node1 ~]#yum install -y kmod-drbd84 drbd84-utils kernel*   ##装完重启一下 
+node2上：
+
+[root@node2 ~]# rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+[root@node2 ~]# rpm -Uvh http://www.elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm
+Retrieving http://www.elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm
+Retrieving http://elrepo.org/elrepo-release-7.0-3.el7.elrepo.noarch.rpm
+Preparing...                          ################################# [100%]
+Updating / installing...
+   1:elrepo-release-7.0-3.el7.elrepo  ################################# [100%]
+[root@node2 ~]#yum install -y kmod-drbd84 drbd84-utils  kernel*
+6、主配置文件：
+
+/etc/drbd.conf #主配置文件 
+
+/etc/drbd.d/global_common.conf #全局配置文件
+
+7、查看主配置文件：
+
+[root@node1 ~]# cat /etc/drbd.conf 
+# You can find an example in  /usr/share/doc/drbd.../drbd.conf.example
+include "drbd.d/global_common.conf";
+include "drbd.d/*.res"; 
+8、配置文件说明：
+
+[root@node1 ~]# vim /etc/drbd.d/global_common.conf 
+global {
+    usage-count no;  #是否参加DRBD使用统计，默认为yes。官方统计drbd的装机量，改为no
+    # minor-count dialog-refresh disable-ip-verification
+}
+common {
+    protocol C;      #使用DRBD的同步协议，添加这一行
+    handlers {
+        pri-on-incon-degr "/usr/lib/drbd/notify-pri-on-incon-degr.sh; /usr/lib/drbd/notify-emergency-reboot.sh; echo b > /proc/sysrq-trigger ; reboot -f";
+        pri-lost-after-sb "/usr/lib/drbd/notify-pri-lost-after-sb.sh; /usr/lib/drbd/notify-emergency-reboot.sh; echo b > /proc/sysrq-trigger ; reboot -f";
+        local-io-error "/usr/lib/drbd/notify-io-error.sh; /usr/lib/drbd/notify-emergency-shutdown.sh; echo o > /proc/sysrq-trigger ; halt -f";
+###需要把这三行的注释去掉
+    }
+    startup {
+        # wfc-timeout degr-wfc-timeout outdated-wfc-timeout wait-after-sb
+    }
+    options {
+        # cpu-mask on-no-data-accessible
+    }
+    disk {
+        on-io-error detach; #配置I/O错误处理策略为分离,添加这一行
+        # size max-bio-bvecs on-io-error fencing disk-barrier disk-flushes
+        # disk-drain md-flushes resync-rate resync-after al-extents
+        # c-plan-ahead c-delay-target c-fill-target c-max-rate
+        # c-min-rate disk-timeout
+    }
+    net {
+        # protocol timeout max-epoch-size max-buffers unplug-watermark
+        # connect-int ping-int sndbuf-size rcvbuf-size ko-count
+        # allow-two-primaries cram-hmac-alg shared-secret after-sb-0pri
+        # after-sb-1pri after-sb-2pri always-asbp rr-conflict
+        # ping-timeout data-integrity-alg tcp-cork on-congestion
+        # congestion-fill congestion-extents csums-alg verify-alg
+        # use-rle
+    }
+    syncer {
+        rate 1024M;    #设置主备节点同步时的网络速率，添加这个选项
+    }
+} 
+注释： on-io-error 策略可能为以下选项之一 
+
+detach 分离：这是默认和推荐的选项，如果在节点上发生底层的硬盘I/O错误，它会将设备运行在Diskless无盘模式下 
+
+pass_on：DRBD会将I/O错误报告到上层，在主节点上，它会将其报告给挂载的文件系统，但是在此节点上就往往忽略（因此此节点上没有可以报告的上层） 
+
+-local-in-error：调用本地磁盘I/O处理程序定义的命令；这需要有相应的local-io-error调用的资源处理程序处理错误的命令；这就给管理员有足够自由的权力命令命令或是脚本调用local-io-error处理I/O错误 
+
+定义一个资源 
+
+9、创建配置文件
+
+[root@node1 ~]# cat /etc/drbd.d/mysql.res    ##这个文件需要自己创建
+resource mysql { #资源名称
+protocol C; #使用协议
+meta-disk internal;
+device /dev/drbd1; #DRBD设备名称
+syncer {
+verify-alg sha1;# 加密算法
+}
+net {
+allow-two-primaries;
+}
+on node1 {     #hostname一定要设为node1，不然下一步会报错的
+disk /dev/sdb;    drbd1使用的磁盘分区为"mysql"
+address 172.25.0.29:7789; #设置DRBD监听地址与端口
+}
+on node2 {
+disk /dev/sdb;
+address 172.25.0.30:7789;
+}
+} 
+10、然后把配置文件copy到对面的机器上：
+
+[root@node1 ~]# scp -rp  /etc/drbd.d/* node2:/etc/drbd.d/
+global_common.conf                                                    100% 2621     2.6KB/s   00:00   
+mysql.res                                                             100%  238     0.2KB/s   00:00 
+可以发现drbd.d目录下的所有文件已经复制node2上了
+
+##注意要先把防火墙给关掉先
+
+11、在node1上面启动mysql
+
+[root@node1 ~]# drbdadm create-md mysql
+You want me to create a v08 style flexible-size internal meta data block.
+There appears to be a v08 flexible-size internal meta data block
+already in place on /dev/sdb at byte offset 2147479552
+Do you really want to overwrite the existing meta-data?
+[need to type 'yes' to confirm] yes
+md_offset 2147479552
+al_offset 2147446784
+bm_offset 2147381248
+Found xfs filesystem
+     2097052 kB data area apparently used
+     2097052 kB left usable by current configuration
+Even though it looks like this would place the new meta data into
+unused space, you still need to confirm, as this is only a guess.
+Do you want to proceed?
+[need to type 'yes' to confirm] yes
+initializing activity log
+initializing bitmap (64 KB) to all zero
+Writing meta data...
+New drbd meta data block successfully created.
+[root@node1 ~]#  modprobe drbd
+[root@node1 ~]# lsmod | grep drbd
+drbd                  396875  0 
+libcrc32c              12644  4 xfs,drbd,nf_nat,nf_conntrack
+[root@node1 ~]# drbdadm up mysql
+[root@node1 ~]# drbdadm -- --force primary mysql
+查看node1的状态：
+[root@node1 ~]# cat /proc/drbd 
+version: 8.4.10-1 (api:1/proto:86-101)
+GIT-hash: a4d5de01fffd7e4cde48a080e2c686f9e8cebf4c build by mockbuild@, 2017-09-15 14:23:22
+ 1: cs:WFConnection ro:Primary/Unknown ds:UpToDate/DUnknown C r----s
+    ns:0 nr:0 dw:0 dr:912 al:8 bm:0 lo:0 pe:0 ua:0 ap:0 ep:1 wo:f oos:2097052
+You have new mail in /var/spool/mail/root
+ 
+
+ 
+
+12、在对端节点执行：
+
+[root@node2 ~]# drbdadm create-md mysql
+You want me to create a v08 style flexible-size internal meta data block.
+There appears to be a v08 flexible-size internal meta data block
+already in place on /dev/sdb at byte offset 2147479552
+Do you really want to overwrite the existing meta-data?
+[need to type 'yes' to confirm] yes
+md_offset 2147479552
+al_offset 2147446784
+bm_offset 2147381248
+Found xfs filesystem
+     2097052 kB data area apparently used
+     2097052 kB left usable by current configuration
+Even though it looks like this would place the new meta data into
+unused space, you still need to confirm, as this is only a guess.
+Do you want to proceed?
+[need to type 'yes' to confirm] yes
+initializing activity log
+initializing bitmap (64 KB) to all zero
+Writing meta data...
+New drbd meta data block successfully created.
+[root@node2 ~]# modprobe drbd
+[root@node2 ~]# drbdadm up mysql 
+在从上面可以查看数据同步的状态：
+
+[root@node2 ~]# cat /proc/drbd 
+version: 8.4.10-1 (api:1/proto:86-101)
+GIT-hash: a4d5de01fffd7e4cde48a080e2c686f9e8cebf4c build by mockbuild@, 2017-09-15 14:23:22
+ 1: cs:SyncTarget ro:Secondary/Primary ds:Inconsistent/UpToDate C r-----
+    ns:0 nr:237568 dw:237568 dr:0 al:8 bm:0 lo:0 pe:0 ua:0 ap:0 ep:1 wo:f oos:1859484
+[=>..................] sync'ed: 11.6% (1859484/2097052)K
+finish: 0:00:39 speed: 47,512 (47,512) want: 102,400 K/sec
+可以看到数据正在同步 
+
+13、格式化并挂载：
+
+[root@node1 ~]#  mkfs.xfs /dev/drbd1
+meta-data=/dev/drbd1             isize=512    agcount=4, agsize=131066 blks
+         =                       sectsz=512   attr=2, projid32bit=1
+         =                       crc=1        finobt=0, sparse=0
+data     =                       bsize=4096   blocks=524263, imaxpct=25
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0 ftype=1
+log      =internal log           bsize=4096   blocks=2560, version=2
+         =                       sectsz=512   sunit=0 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+You have new mail in /var/spool/mail/root
+[root@node1 ~]# mount /dev/drbd1 /mnt
+[root@node1 ~]# df -h
+Filesystem           Size  Used Avail Use% Mounted on
+/dev/mapper/cl-root   18G  2.3G   16G  13% /
+devtmpfs             226M     0  226M   0% /dev
+tmpfs                237M     0  237M   0% /dev/shm
+tmpfs                237M  4.6M  232M   2% /run
+tmpfs                237M     0  237M   0% /sys/fs/cgroup
+/dev/sda1           1014M  197M  818M  20% /boot
+tmpfs                 48M     0   48M   0% /run/user/0
+/dev/drbd1           2.0G   33M  2.0G   2% /mnt 
+注####要想使得从可以挂载，我们必须，先把主切换成丛，然后再到从上面挂载：
+
+14、查看资源链接的状态可以发现是Connected，正常的
+
+[root@node1 ~]# drbdadm cstate mysql 
+Connected 
+15、查看资源角色命令
+
+[root@node1 ~]# drbdadm role  mysql
+Primary/Secondary
+[root@node1 ~]#  ssh node2 "drbdadm role  mysql"
+Secondary/Primary
+[root@node1 ~]# cat /proc/drbd
+version: 8.4.10-1 (api:1/proto:86-101)
+GIT-hash: a4d5de01fffd7e4cde48a080e2c686f9e8cebf4c build by mockbuild@, 2017-09-15 14:23:22
+ 1: cs:Connected ro:Primary/Secondary ds:UpToDate/UpToDate C r-----
+    ns:2099100 nr:0 dw:2048 dr:2098449 al:9 bm:0 lo:0 pe:0 ua:0 ap:0 ep:1 wo:f oos:0 
+注释： 
+
+Parimary 主：资源目前为主，并且可能正在被读取或写入，如果不是双主只会出现在两个节点中的其中一个节点上 
+
+Secondary 次：资源目前为次，正常接收对等节点的更新 
+
+Unknown 未知：资源角色目前未知，本地的资源不会出现这种状态
+
+16、查看硬盘状态：
+
+[root@node1 ~]# drbdadm dstate mysql
+
+UpToDate/UpToDate
+
+本地和对等节点的硬盘有可能为下列状态之一： 
+
+注：
+
+Diskless 无盘：本地没有块设备分配给DRBD使用，这表示没有可用的设备，或者使用drbdadm命令手工分离或是底层的I/O错误导致自动分离 
+
+Attaching：读取无数据时候的瞬间状态 
+
+Failed 失败：本地块设备报告I/O错误的下一个状态，其下一个状态为Diskless无盘 
+
+Negotiating：在已经连接的DRBD设置进行Attach读取无数据前的瞬间状态 
+
+Inconsistent：数据是不一致的，在两个节点上（初始的完全同步前）这种状态出现后立即创建一个新的资源。此外，在同步期间（同步目标）在一个节点上出现这种状态 
+
+Outdated：数据资源是一致的，但是已经过时 
+
+DUnknown：当对等节点网络连接不可用时出现这种状态 
+
+Consistent：一个没有连接的节点数据一致，当建立连接时，它决定数据是UpToDate或是Outdated 
+
+UpToDate：一致的最新的数据状态，这个状态为正常状态 
+
+测试数据同步：
+
+17、安装数据库，我这里用的是centos7的版本
+
+[root@node1 ~]# yum install mariadb-server mariadb -y
+[root@node2 ~]# yum install mariadb-server mariadb -y
+18、把数据库的目录指向/mnt
+
+[root@node1 ~]# cat /etc/my.cnf
+[mysqld]
+datadir=/mnt
+.......
+[root@node2 ~]# cat /etc/my.cnf
+[mysqld]
+datadir=/mnt
+....... 
+19、下一步我们需要把/mnt设置拥有者为mysql
+
+[root@node1 ~]# chown -R mysql:mysql /mnt
+[root@node1 ~]# systemctl restart mariadb 
+[root@node2 ~]# chown -R mysql:mysql /mnt
+[root@node2 ~]# systemctl restart mariadb
+20、我们进入数据库创建数据库
+
+[root@node1 ~]#mysqld_safe --skip-grant-tables &
+[root@node1 ~]#mysql -u root
+MariaDB [(none)]> create database xiaozhang;
+Query OK, 1 row affected (0.12 sec) 
+#创建一个叫xiaozhang的数据库
+
+[root@node2 ~]# mysqld_safe --skip-grant-tables & #进入mariadb安全模式
+21、切换主备节点：
+
+先关掉node1的mariadb
+
+[root@node1 /]# systemctl stop  mariadb 
+1、先把主结点降为从结点(先卸载才能变为从)：
+
+[root@node1 /]# umount /mnt
+[root@node1 /]#  drbdadm secondary mysql  ##降为从
+[root@node1 /]# drbd-overview
+NOTE: drbd-overview will be deprecated soon.
+Please consider using drbdtop.
+ 1:mysql/0  Connected Secondary/Secondary UpToDate/UpToDate 
+可以看到node1已经降为从了
+
+2在node2：
+
+[root@node2 ~]# drbdadm primary mysql
+You have new mail in /var/spool/mail/root
+[root@node2 ~]#  drbd-overview
+NOTE: drbd-overview will be deprecated soon.
+Please consider using drbdtop.
+ 1:mysql/0  Connected Primary/Secondary UpToDate/UpToDate 
+可以看到经把node2,升为主了
+
+3、然后我们挂载试一下：
+
+[root@node2 ~]# mount /dev/drbd1  /mnt
+ 重启mariadb
+
+ 4、检测
+
+ 进入mariadb数据库
+
+[root@node2 ~]#mysql -u root
+  
+ MariaDB [(none)]> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| mysql              |
+| performance_schema |
+| test               |
+| xiaozhang          |
++--------------------+
+5 rows in set (0.07 sec) 
+我们可以看到数据已经同步了，在node2上已经可以看到在node1创的数据库了。
+
+到这里我们就可以基本实现我们的drdb部署，实现数据同步了 ，当然啦，我们部署是需要很多的细节，不过我遇到的基本都解决了，都已经在文档中有提示。
