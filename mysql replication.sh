@@ -72,7 +72,7 @@ replication-ignore-db=databasename1,databasename2
 	#mysql -uroot -S /tmp/mysql.sock -p123456 -e "create database aming"
 	#mysql -uroot -S /tmp/mysql.sock -p123456 aming < /tmp/aming.sql
 	上面的第二行中，使用了-e选项，它用来把mysql的命令写到shell命令行下，其格式为：-e"commond".-e选项很实用！
-	复制我数据后，就需要在slave上配置了：
+	复制完数据后，就需要在slave上配置了：
 	#mysql -uroot -S /tmp/mysql.sock -p123456
 mysql> stop slave;
 mysql> change master to master_host='127.0.0.1',
